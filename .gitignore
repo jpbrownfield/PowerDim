@@ -1,2 +1,15 @@
 /.pytest_cache
 /.venv
+/build
+/dist
+*.spec
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vs/
+Thumbs.db
+.DS_Store

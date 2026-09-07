@@ -5,6 +5,12 @@ from ctypes import wintypes
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+
+# Without this, Windows attributes tray toast notifications to the launching
+# process (python.exe) instead of showing "PowerDim" as the sender.
+shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [wintypes.LPCWSTR]
+shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.HRESULT
 
 # --- Window styles -----------------------------------------------------
 WS_POPUP = 0x80000000
@@ -215,6 +221,30 @@ kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
 HWND_MESSAGE = -3
 
+# --- Console control events (used to restore gamma on Ctrl+C/close/logoff/shutdown) --
+CTRL_C_EVENT = 0
+CTRL_BREAK_EVENT = 1
+CTRL_CLOSE_EVENT = 2
+CTRL_LOGOFF_EVENT = 5
+CTRL_SHUTDOWN_EVENT = 6
+
+PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+kernel32.SetConsoleCtrlHandler.argtypes = [PHANDLER_ROUTINE, wintypes.BOOL]
+kernel32.SetConsoleCtrlHandler.restype = wintypes.BOOL
+
+# --- Single-instance mutex --------------------------------------------------
+ERROR_ALREADY_EXISTS = 183
+
+kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.CreateMutexW.restype = wintypes.HANDLE
+
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
+user32.MessageBoxW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
+user32.MessageBoxW.restype = ctypes.c_int
+
 # --- Timers (used to poll for gamma ramps overwritten by other apps) -------
 WM_TIMER = 0x0113
 
@@ -223,6 +253,19 @@ user32.SetTimer.restype = ctypes.c_size_t
 
 user32.KillTimer.argtypes = [wintypes.HWND, ctypes.c_size_t]
 user32.KillTimer.restype = wintypes.BOOL
+
+# --- Cross-thread quit signaling --------------------------------------------
+# PostQuitMessage only posts WM_QUIT to the *calling* thread's queue -- useless
+# when "Exit" is clicked from the tray icon's own thread, which isn't the thread
+# running the message loop. PostThreadMessage lets us target the right one.
+WM_QUIT = 0x0012
+
+kernel32.GetCurrentThreadId.argtypes = []
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostThreadMessageW.restype = wintypes.BOOL
+
 
 # --- MONITORINFOEX (adds the GDI device name, e.g. "\\.\\DISPLAY1") -------
 CCHDEVICENAME = 32
@@ -263,6 +306,7 @@ gdi32.SetDeviceGammaRamp.restype = wintypes.BOOL
 QDC_ONLY_ACTIVE_PATHS = 0x00000002
 
 DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1
+DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME = 2
 DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO = 9
 DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL = 11
 # Undocumented by Microsoft; reverse-engineered from Windows' own HDR settings
@@ -324,6 +368,23 @@ class DISPLAYCONFIG_SOURCE_DEVICE_NAME(ctypes.Structure):
         ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
         ("viewGdiDeviceName", wintypes.WCHAR * CCHDEVICENAME),
     ]
+
+
+class DISPLAYCONFIG_TARGET_DEVICE_NAME(ctypes.Structure):
+    _fields_ = [
+        ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
+        ("flags", wintypes.UINT),
+        ("outputTechnology", wintypes.UINT),
+        ("edidManufactureId", wintypes.USHORT),
+        ("edidProductCodeId", wintypes.USHORT),
+        ("connectorInstance", wintypes.UINT),
+        ("monitorFriendlyDeviceName", wintypes.WCHAR * 64),
+        ("monitorDevicePath", wintypes.WCHAR * 128),
+    ]
+
+    @property
+    def friendly_name_from_edid(self) -> bool:
+        return bool(self.flags & 0x1)
 
 
 class DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO(ctypes.Structure):

@@ -14,8 +14,8 @@ from typing import Callable
 class FlickerDetector:
     def __init__(
         self,
-        window_seconds: float = 2.0,
-        threshold: int = 4,
+        window_seconds: float = 5.0,
+        threshold: int = 20,
         now_fn: Callable[[], float] = time.monotonic,
     ):
         self._window_seconds = window_seconds

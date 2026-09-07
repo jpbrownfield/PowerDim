@@ -28,6 +28,13 @@ class MonitorGammaDimmer:
             return hdr.set_sdr_white_level_raw(self.device_name, target)
         return self._gamma.set_brightness(brightness_percent)
 
+    def set_shadow_lift(self, percent: float) -> bool:
+        """VRR black-flicker shadow lift: only meaningful on the gamma-ramp path --
+        SDR white level is a single scalar with no per-level LUT to lift shadows in."""
+        if self.is_hdr or self._gamma is None:
+            return False
+        return self._gamma.set_shadow_lift(percent)
+
     def poll_external_change(self) -> bool:
         """Detect another app overwriting our dim curve and re-absorb it. SDR-only:
         there is no cheap change notification for SDR white level to poll."""

@@ -17,20 +17,15 @@ fall back to another dimming mode rather than assume success.
 """
 import ctypes
 
+from . import display_config
 from .win32defs import (
     DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
     DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
-    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
     DISPLAYCONFIG_DEVICE_INFO_SET_SDR_WHITE_LEVEL,
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO,
-    DISPLAYCONFIG_PATH_INFO,
     DISPLAYCONFIG_SDR_WHITE_LEVEL,
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-    QDC_ONLY_ACTIVE_PATHS,
-    _DISPLAYCONFIG_MODE_INFO_SCRATCH,
     user32,
 )
-from ctypes import wintypes
 
 ERROR_SUCCESS = 0
 # SDRWhiteLevel is scaled such that 1000 == 80 nits (the SDR reference white).
@@ -38,45 +33,8 @@ _SDR_WHITE_LEVEL_RAW_PER_NIT = 1000 / 80
 _MIN_SDR_WHITE_LEVEL_RAW = 40  # avoid driving the value to (near) zero
 
 
-def _query_active_paths() -> list:
-    num_paths = wintypes.UINT(0)
-    num_modes = wintypes.UINT(0)
-    if user32.GetDisplayConfigBufferSizes(
-        QDC_ONLY_ACTIVE_PATHS, ctypes.byref(num_paths), ctypes.byref(num_modes)
-    ):
-        return []
-    paths = (DISPLAYCONFIG_PATH_INFO * num_paths.value)()
-    modes = (_DISPLAYCONFIG_MODE_INFO_SCRATCH * num_modes.value)()
-    result = user32.QueryDisplayConfig(
-        QDC_ONLY_ACTIVE_PATHS,
-        ctypes.byref(num_paths),
-        paths,
-        ctypes.byref(num_modes),
-        modes,
-        None,
-    )
-    if result != ERROR_SUCCESS:
-        return []
-    return list(paths)[: num_paths.value]
-
-
-def _find_target_for_device(device_name: str):
-    """Return the (adapterId, targetId) DisplayConfig path target matching a GDI device name."""
-    for path in _query_active_paths():
-        info = DISPLAYCONFIG_SOURCE_DEVICE_NAME()
-        info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME
-        info.header.size = ctypes.sizeof(info)
-        info.header.adapterId = path.sourceInfo.adapterId
-        info.header.id = path.sourceInfo.id
-        if user32.DisplayConfigGetDeviceInfo(ctypes.byref(info.header)) != ERROR_SUCCESS:
-            continue
-        if info.viewGdiDeviceName.upper() == device_name.upper():
-            return path.targetInfo.adapterId, path.targetInfo.id
-    return None
-
-
 def is_hdr_enabled(device_name: str) -> bool:
-    target = _find_target_for_device(device_name)
+    target = display_config.find_target_for_device(device_name)
     if target is None:
         return False
     adapter_id, target_id = target
@@ -91,7 +49,7 @@ def is_hdr_enabled(device_name: str) -> bool:
 
 
 def get_sdr_white_level_raw(device_name: str) -> int | None:
-    target = _find_target_for_device(device_name)
+    target = display_config.find_target_for_device(device_name)
     if target is None:
         return None
     adapter_id, target_id = target
@@ -106,7 +64,7 @@ def get_sdr_white_level_raw(device_name: str) -> int | None:
 
 
 def set_sdr_white_level_raw(device_name: str, raw_value: int) -> bool:
-    target = _find_target_for_device(device_name)
+    target = display_config.find_target_for_device(device_name)
     if target is None:
         return False
     adapter_id, target_id = target

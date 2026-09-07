@@ -1,4 +1,4 @@
-from powerdim.gamma import identity_ramp, ramps_equal, scale_ramp
+from powerdim.gamma import apply_shadow_lift, identity_ramp, ramps_equal, scale_ramp
 
 
 class TestIdentityRamp:
@@ -45,3 +45,31 @@ class TestRampsEqual:
         a = identity_ramp()
         b = scale_ramp(a, 0.5)
         assert not ramps_equal(a, b)
+
+
+class TestApplyShadowLift:
+    def test_zero_percent_is_a_no_op(self):
+        dimmed = scale_ramp(identity_ramp(), 0.5)
+        lifted = apply_shadow_lift(dimmed, 0.0)
+        assert ramps_equal(dimmed, lifted)
+
+    def test_raises_near_black_output(self):
+        dimmed = scale_ramp(identity_ramp(), 0.0)  # fully black
+        lifted = apply_shadow_lift(dimmed, 10.0)
+        assert lifted.Red[0] > dimmed.Red[0]
+        assert lifted.Red[0] == lifted.Green[0] == lifted.Blue[0]
+
+    def test_fades_out_toward_the_top_of_the_range(self):
+        dimmed = scale_ramp(identity_ramp(), 0.0)
+        lifted = apply_shadow_lift(dimmed, 10.0)
+        assert lifted.Red[255] == dimmed.Red[255]
+
+    def test_never_lowers_an_existing_value(self):
+        baseline = identity_ramp()
+        lifted = apply_shadow_lift(baseline, 50.0)
+        assert all(lifted.Red[i] >= baseline.Red[i] for i in range(256))
+
+    def test_percent_is_clamped_to_valid_range(self):
+        dimmed = scale_ramp(identity_ramp(), 0.0)
+        over = apply_shadow_lift(dimmed, 500.0)
+        assert over.Red[0] <= 65535

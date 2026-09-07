@@ -89,6 +89,7 @@ class OverlayWindow:
         )
         if not self.hwnd:
             raise ctypes.WinError(ctypes.get_last_error())
+        self.device_name = rect.device_name
         self._visible = False
 
     def set_alpha(self, alpha: int) -> None:
