@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 
 from . import schedule as schedule_mod
+from . import startup
 from .controller_window import ControllerWindow, HotkeySpec
 from .dimming import clamp, compute_alpha, is_full_brightness
 from .flicker import FlickerDetector
@@ -24,6 +25,13 @@ GAMMA_POLL_INTERVAL_MS = 500
 OVERLAY_RETRY_TIMER_ID = 2
 SCHEDULE_POLL_TIMER_ID = 3
 SCHEDULE_POLL_INTERVAL_MS = 30_000
+
+# Brightness used to actually exercise the gamma-ramp pipeline when probing/
+# verifying support (see _probe_gamma_support / _verify_gamma_available):
+# distinct enough from 100% that a driver silently ignoring non-identity ramp
+# writes will be caught by the post-write readback check, not just trusted
+# because the Win32 call itself reported success.
+_GAMMA_PROBE_BRIGHTNESS_PERCENT = 80
 
 # "Use Gamma if Flickering is Detected for" setting: minutes to stay in gamma mode
 # before automatically re-testing the overlay, plus two sentinels.
@@ -91,6 +99,7 @@ class PowerDimApp:
         self._last_scheduled_brightness = None
         self.controller.start_timer(SCHEDULE_POLL_TIMER_ID, SCHEDULE_POLL_INTERVAL_MS)
         self.dimming_mode = DIMMING_MODE_OVERLAY
+        self.run_on_startup = startup.is_enabled()
 
     def _probe_gamma_support(self) -> tuple[dict, dict]:
         """One-time per-monitor check of whether the windowless dimming path actually
@@ -98,14 +107,20 @@ class PowerDimApp:
         outright) -- used to decide whether gamma-only tray features (Gamma Mode,
         the VRR Black Flicker Tool) should even be offered. Shadow lift is tracked
         separately since it additionally requires the gamma-ramp path specifically
-        (not the HDR SDR-white-level scalar)."""
+        (not the HDR SDR-white-level scalar).
+
+        Probes with an actually-reduced brightness (not 100%) and reads the ramp
+        back afterward: a same-value roundtrip at 100% is a no-op that many WDDM
+        drivers accept and report success on even when they silently ignore real
+        (non-identity) ramp writes, which would otherwise make this probe always
+        pass regardless of whether dimming can really happen."""
         gamma_supported = {name: False for name in self._monitor_device_names}
         shadow_lift_supported = {name: False for name in self._monitor_device_names}
         for dimmer in build_monitor_dimmers(self._monitor_device_names):
-            ok = dimmer.set_brightness(100)
+            ok = dimmer.set_brightness(_GAMMA_PROBE_BRIGHTNESS_PERCENT) and dimmer.verify_applied()
             gamma_supported[dimmer.device_name] = ok
             shadow_lift_supported[dimmer.device_name] = ok and not dimmer.is_hdr
-            dimmer.close()
+            dimmer.close()  # restores the probed monitor back to its baseline
         return gamma_supported, shadow_lift_supported
 
     def set_monitor_enabled(self, device_name: str, enabled: bool) -> None:
@@ -200,6 +215,10 @@ class PowerDimApp:
         self.schedule_entries = schedule_mod.load_entries()
         self._last_scheduled_brightness = None
 
+    def set_run_on_startup(self, enabled: bool) -> None:
+        startup.set_enabled(enabled)
+        self.run_on_startup = enabled
+
     def set_brightness(self, value: int) -> None:
         self.brightness = clamp(value, 0, 100)
         logger.info(
@@ -246,22 +265,34 @@ class PowerDimApp:
         self.controller.start_timer(GAMMA_POLL_TIMER_ID, GAMMA_POLL_INTERVAL_MS)
 
     def _verify_gamma_available(self) -> bool:
-        """Actually attempt to apply the current brightness via gamma on every
-        monitor before committing to gamma dimming -- some virtual/RDP displays
-        and drivers reject SetDeviceGammaRamp outright. Reverts any partial
-        application on failure so no monitor is left in a half-applied state.
+        """Actually attempt to apply a genuinely-reduced brightness via gamma on
+        every monitor before committing to gamma dimming -- some virtual/RDP
+        displays and drivers reject SetDeviceGammaRamp outright, and some accept
+        it but silently ignore non-identity curves (see _probe_gamma_support), so
+        testing at the current brightness alone would pass trivially whenever it
+        happens to be 100%. Reverts any partial application on failure so no
+        monitor is left in a half-applied state, and re-applies the real target
+        brightness once every monitor has proven it actually works.
         """
         self._ensure_gamma_dimmers()
         enabled_dimmers = [
             d for d in self._gamma_dimmers if self.monitor_enabled.get(d.device_name, True)
         ]
-        results = [d.set_brightness(self.brightness) for d in enabled_dimmers]
-        if enabled_dimmers and all(results):
-            return True
+        if not enabled_dimmers:
+            self.controller.stop_timer(GAMMA_POLL_TIMER_ID)
+            return False
+        results = [
+            d.set_brightness(_GAMMA_PROBE_BRIGHTNESS_PERCENT) and d.verify_applied()
+            for d in enabled_dimmers
+        ]
+        if not all(results):
+            for d in enabled_dimmers:
+                d.restore()
+            self.controller.stop_timer(GAMMA_POLL_TIMER_ID)
+            return False
         for d in enabled_dimmers:
-            d.restore()
-        self.controller.stop_timer(GAMMA_POLL_TIMER_ID)
-        return False
+            d.set_brightness(self.brightness)
+        return True
 
     def _reassert_topmost(self) -> None:
         # _use_gamma is permanently True in dedicated gamma mode, so this also

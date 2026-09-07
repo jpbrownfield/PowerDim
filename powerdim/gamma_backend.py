@@ -8,6 +8,10 @@ hardware-independent flip, because neither one involves a window at all.
 from . import hdr
 from .gamma import GammaChannel
 
+# Raw SDR-white-level units of slack allowed between what we asked for and what
+# reads back, since some drivers round to their own internal step size.
+_SDR_WHITE_LEVEL_VERIFY_TOLERANCE = 5
+
 
 class MonitorGammaDimmer:
     def __init__(self, device_name: str):
@@ -15,6 +19,8 @@ class MonitorGammaDimmer:
         self.is_hdr = hdr.is_hdr_enabled(device_name)
         self._gamma: GammaChannel | None = None
         self._sdr_baseline_raw: int | None = None
+        self._sdr_last_applied_raw: int | None = None
+        self._current_brightness_percent = 100
         if self.is_hdr:
             self._sdr_baseline_raw = hdr.get_sdr_white_level_raw(device_name)
         else:
@@ -25,8 +31,18 @@ class MonitorGammaDimmer:
             if self._sdr_baseline_raw is None:
                 return False
             target = hdr.scale_white_level_raw(self._sdr_baseline_raw, brightness_percent / 100.0)
-            return hdr.set_sdr_white_level_raw(self.device_name, target)
-        return self._gamma.set_brightness(brightness_percent)
+            if not hdr.set_sdr_white_level_raw(self.device_name, target):
+                return False
+            actual = hdr.get_sdr_white_level_raw(self.device_name)
+            if actual is None or abs(actual - target) > _SDR_WHITE_LEVEL_VERIFY_TOLERANCE:
+                return False
+            self._sdr_last_applied_raw = actual
+            self._current_brightness_percent = brightness_percent
+            return True
+        ok = self._gamma.set_brightness(brightness_percent)
+        if ok:
+            self._current_brightness_percent = brightness_percent
+        return ok
 
     def set_shadow_lift(self, percent: float) -> bool:
         """VRR black-flicker shadow lift: only meaningful on the gamma-ramp path --
@@ -35,10 +51,31 @@ class MonitorGammaDimmer:
             return False
         return self._gamma.set_shadow_lift(percent)
 
+    def verify_applied(self) -> bool:
+        """Confirm the last set_brightness() call actually changed the physical
+        output, not just that the Win32 call reported success. Both paths now read
+        back and compare (see set_brightness's own readback check for HDR, and
+        GammaChannel.readback_matches_last_applied for SDR gamma ramp)."""
+        if self.is_hdr:
+            return self._sdr_last_applied_raw is not None
+        if self._gamma is None:
+            return True
+        return self._gamma.readback_matches_last_applied()
+
     def poll_external_change(self) -> bool:
-        """Detect another app overwriting our dim curve and re-absorb it. SDR-only:
-        there is no cheap change notification for SDR white level to poll."""
-        if self.is_hdr or self._gamma is None:
+        """Detect another app (or the user, e.g. moving Windows' own "SDR content
+        brightness" slider) overwriting our dim curve, and re-absorb it by treating
+        the new value as the undimmed baseline and reapplying our current dim
+        factor on top of it."""
+        if self.is_hdr:
+            if self._sdr_baseline_raw is None or self._sdr_last_applied_raw is None:
+                return False
+            current = hdr.get_sdr_white_level_raw(self.device_name)
+            if current is None or current == self._sdr_last_applied_raw:
+                return False
+            self._sdr_baseline_raw = current
+            return self.set_brightness(self._current_brightness_percent)
+        if self._gamma is None:
             return False
         return self._gamma.resync_if_externally_changed()
 

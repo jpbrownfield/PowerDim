@@ -21,9 +21,11 @@ from . import display_config
 from .win32defs import (
     DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
     DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+    DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
     DISPLAYCONFIG_DEVICE_INFO_SET_SDR_WHITE_LEVEL,
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO,
     DISPLAYCONFIG_SDR_WHITE_LEVEL,
+    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE,
     user32,
 )
 
@@ -46,6 +48,47 @@ def is_hdr_enabled(device_name: str) -> bool:
     if user32.DisplayConfigGetDeviceInfo(ctypes.byref(info.header)) != ERROR_SUCCESS:
         return False
     return info.advanced_color_enabled
+
+
+def is_hdr_supported(device_name: str) -> bool:
+    """True if the display is HDR-capable at all, regardless of whether it's
+    currently turned on. Lets callers distinguish a display that can never use
+    the HDR pipeline (safe to always trust the gamma-ramp path) from one that's
+    HDR-capable but happens to be off right now (still worth rechecking
+    is_hdr_enabled() before every gamma-ramp attempt, since the user or a game
+    can toggle it at any time)."""
+    target = display_config.find_target_for_device(device_name)
+    if target is None:
+        return False
+    adapter_id, target_id = target
+    info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO()
+    info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO
+    info.header.size = ctypes.sizeof(info)
+    info.header.adapterId = adapter_id
+    info.header.id = target_id
+    if user32.DisplayConfigGetDeviceInfo(ctypes.byref(info.header)) != ERROR_SUCCESS:
+        return False
+    return info.advanced_color_supported
+
+
+def set_hdr_enabled(device_name: str, enabled: bool) -> bool:
+    """Toggle HDR/Advanced Color for a display -- the same documented API and
+    info type Windows' own Settings > Display > HDR switch uses, unlike the
+    reverse-engineered SDR-white-level setter above. Causes a brief visible
+    mode renegotiation (like flipping that Settings toggle by hand), so this
+    must only ever be triggered by an explicit user action, never silently as
+    part of routine brightness changes."""
+    target = display_config.find_target_for_device(device_name)
+    if target is None:
+        return False
+    adapter_id, target_id = target
+    info = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE()
+    info.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE
+    info.header.size = ctypes.sizeof(info)
+    info.header.adapterId = adapter_id
+    info.header.id = target_id
+    info.set_enable_advanced_color(enabled)
+    return user32.DisplayConfigSetDeviceInfo(ctypes.byref(info.header)) == ERROR_SUCCESS
 
 
 def get_sdr_white_level_raw(device_name: str) -> int | None:

@@ -16,6 +16,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -30,6 +32,32 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/ -q
 
+      - name: Determine release tag
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $tag = $env:GITHUB_REF_NAME
+          } else {
+            # Branch push: auto-bump the patch version off the highest existing
+            # vX.Y.Z tag (starting at v0.1.0 if there isn't one yet) and push it,
+            # which also re-triggers this workflow for the tag itself -- that
+            # second run just reuses the tag below instead of bumping again.
+            git fetch --tags --quiet
+            $tags = git tag --list 'v*.*.*' | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } | Sort-Object { [version]($_ -replace '^v', '') }
+            if ($tags) {
+              $parts = ($tags[-1] -replace '^v', '').Split('.')
+              $tag = "v$($parts[0]).$($parts[1]).$([int]$parts[2] + 1)"
+            } else {
+              $tag = "v0.1.0"
+            }
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag $tag
+            git push origin $tag
+          }
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
       - name: Build executable
         run: pyinstaller --onefile --noconsole --name PowerDim main.py
 
@@ -39,8 +67,8 @@ jobs:
           path: dist/PowerDim.exe
 
       - name: Create release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
           files: dist/PowerDim.exe
           generate_release_notes: true

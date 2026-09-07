@@ -82,6 +82,9 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
     def handle_edit_schedule(icon, item):
         threading.Thread(target=open_schedule_editor, args=(app,), daemon=True).start()
 
+    def handle_toggle_run_on_startup(icon, item):
+        app.set_run_on_startup(not app.run_on_startup)
+
     menu_items = [
         pystray.MenuItem(
             app.monitor_friendly_names.get(name, name),
@@ -141,6 +144,13 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
                 ),
                 pystray.MenuItem("Edit Schedule...", handle_edit_schedule),
             ),
+        )
+    )
+    menu_items.append(
+        pystray.MenuItem(
+            "Run on Startup",
+            handle_toggle_run_on_startup,
+            checked=lambda item: app.run_on_startup,
         )
     )
     menu_items.append(pystray.MenuItem("Reset display to normal", handle_reset_gamma))

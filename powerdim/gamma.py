@@ -136,6 +136,17 @@ class GammaChannel:
         self.set_brightness(round(self._factor * 100))
         return True
 
+    def readback_matches_last_applied(self) -> bool:
+        """Some WDDM drivers accept SetDeviceGammaRamp and report success without
+        actually changing the physical output -- notably common over HDMI on TVs
+        and displays whose scaler ignores the legacy gamma-ramp IOCTL entirely.
+        Read the ramp back and compare it to what we last wrote to catch that
+        silent no-op, rather than trusting the API's return value alone."""
+        if self._last_applied is None:
+            return True
+        current = self._read_ramp()
+        return current is not None and ramps_equal(current, self._last_applied)
+
     def restore(self) -> bool:
         """Reapply the pre-dim baseline. Only clears the crash-recovery record on
         success -- if the ramp write fails, the monitor may still be dimmed, so the

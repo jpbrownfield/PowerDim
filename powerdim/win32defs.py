@@ -308,6 +308,7 @@ QDC_ONLY_ACTIVE_PATHS = 0x00000002
 DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1
 DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME = 2
 DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO = 9
+DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE = 10
 DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL = 11
 # Undocumented by Microsoft; reverse-engineered from Windows' own HDR settings
 # UI and used by community tools (e.g. HDR Tray). Not guaranteed stable across
@@ -396,8 +397,33 @@ class DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO(ctypes.Structure):
     ]
 
     @property
+    def advanced_color_supported(self) -> bool:
+        """True if the display is capable of HDR/wide-color at all, independent of
+        whether it's currently turned on -- lets callers distinguish "never HDR"
+        (safe to trust the gamma-ramp path) from "HDR-capable but off right now"."""
+        return bool(self.value & 0x1)
+
+    @property
     def advanced_color_enabled(self) -> bool:
         return bool(self.value & 0x2)
+
+    @property
+    def advanced_color_force_disabled(self) -> bool:
+        """True if policy/driver has forced HDR off regardless of the user's setting."""
+        return bool(self.value & 0x8)
+
+
+class DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE(ctypes.Structure):
+    """Documented (unlike the SDR-white-level setter) -- this is what Windows'
+    own Settings > Display > HDR toggle uses under the hood."""
+
+    _fields_ = [
+        ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
+        ("value", wintypes.UINT),
+    ]
+
+    def set_enable_advanced_color(self, enabled: bool) -> None:
+        self.value = 1 if enabled else 0
 
 
 class DISPLAYCONFIG_SDR_WHITE_LEVEL(ctypes.Structure):
