@@ -59,7 +59,7 @@ jobs:
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Build executable
-        run: pyinstaller --onefile --noconsole --name PowerDim main.py
+        run: pyinstaller --onefile --noconsole --name PowerDim --icon assets/icon.ico main.py
 
       - uses: actions/upload-artifact@v4
         with:

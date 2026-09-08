@@ -8,10 +8,6 @@ hardware-independent flip, because neither one involves a window at all.
 from . import hdr
 from .gamma import GammaChannel
 
-# Raw SDR-white-level units of slack allowed between what we asked for and what
-# reads back, since some drivers round to their own internal step size.
-_SDR_WHITE_LEVEL_VERIFY_TOLERANCE = 5
-
 
 class MonitorGammaDimmer:
     def __init__(self, device_name: str):
@@ -19,25 +15,39 @@ class MonitorGammaDimmer:
         self.is_hdr = hdr.is_hdr_enabled(device_name)
         self._gamma: GammaChannel | None = None
         self._sdr_baseline_raw: int | None = None
-        self._sdr_last_applied_raw: int | None = None
+        self._sdr_last_known_raw: int | None = None
+        self._sdr_last_write_ok = False
         self._current_brightness_percent = 100
         if self.is_hdr:
             self._sdr_baseline_raw = hdr.get_sdr_white_level_raw(device_name)
+            self._sdr_last_known_raw = self._sdr_baseline_raw
         else:
             self._gamma = GammaChannel(device_name)
 
     def set_brightness(self, brightness_percent: int) -> bool:
         if self.is_hdr:
             if self._sdr_baseline_raw is None:
+                self._sdr_last_write_ok = False
                 return False
             target = hdr.scale_white_level_raw(self._sdr_baseline_raw, brightness_percent / 100.0)
+            previous = self._sdr_last_known_raw
             if not hdr.set_sdr_white_level_raw(self.device_name, target):
+                self._sdr_last_write_ok = False
                 return False
             actual = hdr.get_sdr_white_level_raw(self.device_name)
-            if actual is None or abs(actual - target) > _SDR_WHITE_LEVEL_VERIFY_TOLERANCE:
+            if actual is None:
+                self._sdr_last_write_ok = False
                 return False
-            self._sdr_last_applied_raw = actual
+            # Drivers round SDRWhiteLevel to their own step size, so don't demand
+            # an exact match to our target -- only reject a write that left the
+            # value completely unchanged despite asking for a real change (that's
+            # the "reports success but silently no-ops" bug this replaced).
+            if actual == previous and target != previous:
+                self._sdr_last_write_ok = False
+                return False
+            self._sdr_last_known_raw = actual
             self._current_brightness_percent = brightness_percent
+            self._sdr_last_write_ok = True
             return True
         ok = self._gamma.set_brightness(brightness_percent)
         if ok:
@@ -57,7 +67,7 @@ class MonitorGammaDimmer:
         back and compare (see set_brightness's own readback check for HDR, and
         GammaChannel.readback_matches_last_applied for SDR gamma ramp)."""
         if self.is_hdr:
-            return self._sdr_last_applied_raw is not None
+            return self._sdr_last_write_ok
         if self._gamma is None:
             return True
         return self._gamma.readback_matches_last_applied()
@@ -68,10 +78,10 @@ class MonitorGammaDimmer:
         the new value as the undimmed baseline and reapplying our current dim
         factor on top of it."""
         if self.is_hdr:
-            if self._sdr_baseline_raw is None or self._sdr_last_applied_raw is None:
+            if self._sdr_baseline_raw is None or self._sdr_last_known_raw is None:
                 return False
             current = hdr.get_sdr_white_level_raw(self.device_name)
-            if current is None or current == self._sdr_last_applied_raw:
+            if current is None or current == self._sdr_last_known_raw:
                 return False
             self._sdr_baseline_raw = current
             return self.set_brightness(self._current_brightness_percent)

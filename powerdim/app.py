@@ -219,6 +219,15 @@ class PowerDimApp:
         startup.set_enabled(enabled)
         self.run_on_startup = enabled
 
+    def effective_dimming_mode_for_monitor(self, device_name: str) -> str:
+        """Which mechanism actually drives this specific monitor right now --
+        can differ from self.dimming_mode, since a monitor gamma can't control
+        always falls back to the overlay even while Gamma Mode is selected."""
+        gamma_mode_selected = self.dimming_mode == DIMMING_MODE_GAMMA or self._use_gamma
+        if gamma_mode_selected and self.monitor_gamma_supported.get(device_name, False):
+            return DIMMING_MODE_GAMMA
+        return DIMMING_MODE_OVERLAY
+
     def set_brightness(self, value: int) -> None:
         self.brightness = clamp(value, 0, 100)
         logger.info(
@@ -226,6 +235,7 @@ class PowerDimApp:
             self.brightness,
             "gamma" if self._use_gamma else "overlay",
         )
+        overlays_by_name = {overlay.device_name: overlay for overlay in self.overlays}
         if is_full_brightness(self.brightness):
             for overlay in self.overlays:
                 if self.monitor_enabled.get(overlay.device_name, True):
@@ -245,13 +255,24 @@ class PowerDimApp:
             self.controller.stop_timer(GAMMA_POLL_TIMER_ID)
             self.controller.stop_timer(OVERLAY_RETRY_TIMER_ID)
             return
+        alpha = compute_alpha(self.brightness)
         if self.dimming_mode == DIMMING_MODE_GAMMA or self._use_gamma:
             self._ensure_gamma_dimmers()
-            for dimmer in self._gamma_dimmers:
-                if self.monitor_enabled.get(dimmer.device_name, True):
-                    dimmer.set_brightness(self.brightness)
+            gamma_by_name = {dimmer.device_name: dimmer for dimmer in self._gamma_dimmers}
+            for name in self._monitor_device_names:
+                if not self.monitor_enabled.get(name, True):
+                    continue
+                overlay = overlays_by_name.get(name)
+                if self.monitor_gamma_supported.get(name, False):
+                    gamma_by_name[name].set_brightness(self.brightness)
+                    if overlay is not None:
+                        overlay.hide()
+                elif overlay is not None:
+                    # Fallback for a monitor gamma can't control, so nothing is
+                    # ever left undimmed just because Gamma Mode was selected.
+                    overlay.set_alpha(alpha)
+                    overlay.show()
             return
-        alpha = compute_alpha(self.brightness)
         for overlay in self.overlays:
             if not self.monitor_enabled.get(overlay.device_name, True):
                 continue
@@ -266,13 +287,14 @@ class PowerDimApp:
 
     def _verify_gamma_available(self) -> bool:
         """Actually attempt to apply a genuinely-reduced brightness via gamma on
-        every monitor before committing to gamma dimming -- some virtual/RDP
+        each monitor before committing to gamma dimming -- some virtual/RDP
         displays and drivers reject SetDeviceGammaRamp outright, and some accept
         it but silently ignore non-identity curves (see _probe_gamma_support), so
         testing at the current brightness alone would pass trivially whenever it
-        happens to be 100%. Reverts any partial application on failure so no
-        monitor is left in a half-applied state, and re-applies the real target
-        brightness once every monitor has proven it actually works.
+        happens to be 100%. Gamma Mode is allowed to activate as long as at least
+        one enabled monitor actually works -- monitors that don't are reverted and
+        simply left undimmed (see monitor_gamma_supported / the tray's "No Gamma
+        Control" label), rather than blocking the whole mode.
         """
         self._ensure_gamma_dimmers()
         enabled_dimmers = [
@@ -281,16 +303,20 @@ class PowerDimApp:
         if not enabled_dimmers:
             self.controller.stop_timer(GAMMA_POLL_TIMER_ID)
             return False
-        results = [
-            d.set_brightness(_GAMMA_PROBE_BRIGHTNESS_PERCENT) and d.verify_applied()
-            for d in enabled_dimmers
-        ]
-        if not all(results):
-            for d in enabled_dimmers:
+        working = []
+        for d in enabled_dimmers:
+            ok = d.set_brightness(_GAMMA_PROBE_BRIGHTNESS_PERCENT) and d.verify_applied()
+            # Keep the tray's per-monitor support state (and future set_brightness
+            # calls) in sync with what this live check just found.
+            self.monitor_gamma_supported[d.device_name] = ok
+            if ok:
+                working.append(d)
+            else:
                 d.restore()
+        if not working:
             self.controller.stop_timer(GAMMA_POLL_TIMER_ID)
             return False
-        for d in enabled_dimmers:
+        for d in working:
             d.set_brightness(self.brightness)
         return True
 

@@ -15,6 +15,13 @@ def open_shadow_lift_editor(app) -> None:
     root = tk.Tk()
     root.title("OLED VRR Black Flicker Tool")
     root.resizable(False, False)
+    # Windows often won't hand foreground focus to a window raised from a
+    # background thread (tray click), so it can open silently behind other
+    # windows unless we force it forward.
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(200, lambda: root.attributes("-topmost", False))
+    root.focus_force()
 
     frame = ttk.Frame(root, padding=12)
     frame.grid(row=0, column=0, sticky="nsew")

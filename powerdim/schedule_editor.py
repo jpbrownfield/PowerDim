@@ -50,6 +50,13 @@ def open_schedule_editor(app) -> None:
     # Kept on root to prevent garbage collection from clearing the window icon.
     root.icon_image = ImageTk.PhotoImage(_make_calendar_icon())
     root.iconphoto(True, root.icon_image)
+    # Windows often won't hand foreground focus to a window raised from a
+    # background thread (tray click), so it can open silently behind other
+    # windows unless we force it forward.
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(200, lambda: root.attributes("-topmost", False))
+    root.focus_force()
 
     entries = schedule_mod.load_entries()
     selected_entry = None  # the ScheduleEntry currently loaded into the form, if any

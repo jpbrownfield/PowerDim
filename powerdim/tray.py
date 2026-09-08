@@ -1,7 +1,7 @@
 """System tray icon: brightness presets + exit, running on its own thread."""
+import re
 import threading
 
-from PIL import Image, ImageDraw
 import pystray
 
 from .app import (
@@ -11,6 +11,7 @@ from .app import (
     GAMMA_DURATION_NEVER,
     PowerDimApp,
 )
+from .app_icon import make_icon_image
 from .schedule_editor import open_schedule_editor
 from .shadow_lift_editor import open_shadow_lift_editor
 
@@ -29,13 +30,6 @@ _GAMMA_DURATION_LABELS = {
     120: "2 hours",
     GAMMA_DURATION_INDEFINITE: "Indefinitely",
 }
-
-
-def _make_icon_image() -> Image.Image:
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.ellipse((4, 4, 60, 60), fill=(20, 20, 20, 255), outline=(220, 220, 220, 255), width=3)
-    return img
 
 
 def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
@@ -85,9 +79,69 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
     def handle_toggle_run_on_startup(icon, item):
         app.set_run_on_startup(not app.run_on_startup)
 
+    # Best-effort match to the number Windows itself shows in Display Settings:
+    # device names are of the form "\\.\DISPLAYn"; fall back to enumeration
+    # order for anything that doesn't fit that shape. Re-ranked to consecutive
+    # 1, 2, 3... so a gap in the underlying numbers (e.g. left behind by a
+    # monitor that's since been unplugged) doesn't show up as a confusing
+    # non-consecutive index.
+    raw_display_numbers = {}
+    for position, name in enumerate(app.monitor_friendly_names, start=1):
+        match = re.search(r"(\d+)$", name)
+        raw_display_numbers[name] = int(match.group(1)) if match else position
+    rank_by_raw_number = {
+        raw: rank for rank, raw in enumerate(sorted(set(raw_display_numbers.values())), start=1)
+    }
+    monitor_indices = {name: rank_by_raw_number[raw] for name, raw in raw_display_numbers.items()}
+
+    def _monitor_label(name):
+        label = f"{monitor_indices.get(name, '?')}: {app.monitor_friendly_names.get(name, name)}"
+        if not app.monitor_gamma_supported.get(name, False):
+            label += " (No Gamma Control)"
+        return label
+
+    def _enabled_monitor_names():
+        return [name for name in app.monitor_friendly_names if app.monitor_enabled.get(name, True)]
+
+    def _monitors_in_mode(mode):
+        return sorted(
+            monitor_indices.get(name, 0)
+            for name in _enabled_monitor_names()
+            if app.effective_dimming_mode_for_monitor(name) == mode
+        )
+
+    def _mode_is_split():
+        enabled_names = _enabled_monitor_names()
+        if not enabled_names:
+            return False
+        effective_modes = {app.effective_dimming_mode_for_monitor(name) for name in enabled_names}
+        return len(effective_modes) > 1
+
+    def _mode_label(mode):
+        base = _DIMMING_MODE_LABELS[mode]
+        if not _mode_is_split():
+            return base
+        indices = _monitors_in_mode(mode)
+        if not indices:
+            return base
+        if len(indices) == 1:
+            return f"{base} (Monitor {indices[0]})"
+        return f"{base} (Monitors {', '.join(str(i) for i in indices)})"
+
+    def _mode_checked(mode):
+        if _mode_is_split():
+            return True
+        return app.dimming_mode == mode
+
+    def _mode_radio(mode):
+        # A dot when monitors are split across both modes, a checkmark when
+        # they all agree -- same distinction Windows draws between radio-style
+        # and regular checkable menu items.
+        return _mode_is_split()
+
     menu_items = [
         pystray.MenuItem(
-            app.monitor_friendly_names.get(name, name),
+            lambda item, name=name: _monitor_label(name),
             make_toggle_monitor(name),
             checked=lambda item, name=name: app.monitor_enabled.get(name, True),
         )
@@ -96,12 +150,12 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
     menu_items.append(pystray.Menu.SEPARATOR)
     menu_items.extend(
         pystray.MenuItem(
-            label,
+            lambda item, mode=mode: _mode_label(mode),
             make_set_dimming_mode(mode),
-            checked=lambda item, mode=mode: app.dimming_mode == mode,
-            radio=True,
+            checked=lambda item, mode=mode: _mode_checked(mode),
+            radio=lambda item, mode=mode: _mode_radio(mode),
         )
-        for mode, label in _DIMMING_MODE_LABELS.items()
+        for mode in _DIMMING_MODE_LABELS
     )
     menu_items.append(pystray.Menu.SEPARATOR)
     menu_items.extend(
@@ -175,7 +229,7 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
     # the taskbar edge / get obscured by it.
     menu_items.append(pystray.MenuItem(" ", None, enabled=False))
 
-    icon = pystray.Icon("PowerDim", _make_icon_image(), "PowerDim", pystray.Menu(*menu_items))
+    icon = pystray.Icon("PowerDim", make_icon_image(), "PowerDim", pystray.Menu(*menu_items))
     app.on_flicker_fallback = lambda: icon.notify(
         "Switching to gamma dimming due to detected flicker", "PowerDim"
     )
