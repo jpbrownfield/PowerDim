@@ -13,6 +13,10 @@ jobs:
     # PyInstaller is not cross-compiling: it can only produce a Windows .exe when
     # run on Windows, since it bundles the interpreter/DLLs of the host platform.
     runs-on: windows-latest
+    # `secrets` isn't a valid context for a step's `if:` -- proxy it through a
+    # job-level env var (which does allow `secrets`) instead.
+    env:
+      HAS_CODESIGN_CERT: ${{ secrets.CODESIGN_PFX_BASE64 != '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +90,7 @@ jobs:
         run: pyinstaller --onefile --noconsole --name PowerDim --icon assets/icon.ico main.py
 
       - name: Sign executable
-        if: ${{ secrets.CODESIGN_PFX_BASE64 != '' }}
+        if: ${{ env.HAS_CODESIGN_CERT == 'true' }}
         shell: pwsh
         env:
           CODESIGN_PFX_BASE64: ${{ secrets.CODESIGN_PFX_BASE64 }}
