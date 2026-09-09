@@ -48,11 +48,20 @@ WINEVENT_SKIPOWNPROCESS = 0x0002
 # --- Hotkeys -------------------------------------------------------------
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 WM_HOTKEY = 0x0312
 VK_UP = 0x26
 VK_DOWN = 0x28
+VK_LEFT = 0x25
+VK_RIGHT = 0x27
 VK_HOME = 0x24
+VK_END = 0x23
+VK_PRIOR = 0x21  # Page Up
+VK_NEXT = 0x22  # Page Down
+VK_INSERT = 0x2D
+VK_DELETE = 0x2E
 
 # --- Messages --------------------------------------------------------------
 WM_DESTROY = 0x0002
@@ -175,6 +184,34 @@ user32.EnumDisplayMonitors.restype = wintypes.BOOL
 
 user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.c_void_p]
 user32.GetMonitorInfoW.restype = wintypes.BOOL
+
+MONITOR_DEFAULTTONEAREST = 2
+
+user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+user32.MonitorFromPoint.restype = wintypes.HMONITOR
+
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+user32.GetCursorPos.restype = wintypes.BOOL
+
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.SetForegroundWindow.restype = wintypes.BOOL
+
+# --- Popup menu positioning (used to keep the tray menu off the taskbar) ---
+TPM_LEFTALIGN = 0x0000
+TPM_RIGHTALIGN = 0x0008
+TPM_TOPALIGN = 0x0000
+TPM_BOTTOMALIGN = 0x0020
+TPM_RETURNCMD = 0x0100
+
+user32.TrackPopupMenuEx.argtypes = [
+    wintypes.HMENU,
+    wintypes.UINT,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.HWND,
+    ctypes.c_void_p,
+]
+user32.TrackPopupMenuEx.restype = ctypes.c_int
 
 user32.SetWinEventHook.argtypes = [
     wintypes.DWORD,

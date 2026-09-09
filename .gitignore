@@ -13,3 +13,7 @@ htmlcov/
 .vs/
 Thumbs.db
 .DS_Store
+
+# Code-signing private key material -- never commit this.
+scripts/codesign.pfx
+scripts/codesign.pfx.base64.txt

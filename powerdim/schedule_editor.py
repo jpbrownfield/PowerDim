@@ -45,11 +45,14 @@ def _to_12h(hour24: int) -> tuple[int, str]:
 def open_schedule_editor(app) -> None:
     root = tk.Tk()
     root.title("PowerDim Schedule")
-    root.geometry("420x360")
-    root.minsize(420, 360)
+    root.geometry("480x360")
+    root.minsize(480, 360)
     # Kept on root to prevent garbage collection from clearing the window icon.
     root.icon_image = ImageTk.PhotoImage(_make_calendar_icon())
-    root.iconphoto(True, root.icon_image)
+    # False (not the process-wide default) so this doesn't get clobbered by
+    # another editor dialog's own icon -- Tk's "-default" icon on Windows is
+    # shared at the window-class level across the whole process, not per-window.
+    root.iconphoto(False, root.icon_image)
     # Windows often won't hand foreground focus to a window raised from a
     # background thread (tray click), so it can open silently behind other
     # windows unless we force it forward.
@@ -101,7 +104,7 @@ def open_schedule_editor(app) -> None:
                 values=(
                     f"{hour12}:{entry.minute:02d} {ampm}",
                     f"{entry.brightness}%",
-                    "Enabled" if entry.enabled else "Disabled",
+                    "Active" if entry.enabled else "Inactive",
                 ),
                 tags=tags,
             )
@@ -136,7 +139,7 @@ def open_schedule_editor(app) -> None:
     ttk.Combobox(
         form, textvariable=brightness_var, values=_BRIGHTNESS_CHOICES, width=6, state="readonly"
     ).grid(row=0, column=5, padx=6)
-    ttk.Checkbutton(form, text="Enabled", variable=enabled_var).grid(row=0, column=6, padx=6)
+    ttk.Checkbutton(form, text="Active", variable=enabled_var).grid(row=0, column=6, padx=6)
 
     def clear_form() -> None:
         nonlocal selected_entry, suspend_autosave

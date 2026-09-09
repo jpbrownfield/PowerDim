@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime
 
+from . import hotkeys as hotkeys_mod
 from . import schedule as schedule_mod
 from . import startup
 from .controller_window import ControllerWindow, HotkeySpec
@@ -11,14 +12,10 @@ from .foreground_hook import ForegroundHook
 from .gamma_backend import build_monitor_dimmers
 from .monitors import get_monitor_rects
 from .overlay import OverlayWindow
-from .win32defs import MOD_ALT, MOD_CONTROL, VK_DOWN, VK_HOME, VK_UP
 
 logger = logging.getLogger(__name__)
 
-HOTKEY_BRIGHTNESS_UP = 1
-HOTKEY_BRIGHTNESS_DOWN = 2
-HOTKEY_RESET = 3
-BRIGHTNESS_STEP = 5
+BRIGHTNESS_STEP = 10
 
 GAMMA_POLL_TIMER_ID = 1
 GAMMA_POLL_INTERVAL_MS = 500
@@ -81,13 +78,11 @@ class PowerDimApp:
         self._use_gamma = False
         self._flicker = FlickerDetector()
         self.controller = ControllerWindow(on_hotkey=self._on_hotkey)
-        self.controller.register_hotkey(
-            HotkeySpec(HOTKEY_BRIGHTNESS_UP, MOD_CONTROL | MOD_ALT, VK_UP)
-        )
-        self.controller.register_hotkey(
-            HotkeySpec(HOTKEY_BRIGHTNESS_DOWN, MOD_CONTROL | MOD_ALT, VK_DOWN)
-        )
-        self.controller.register_hotkey(HotkeySpec(HOTKEY_RESET, MOD_CONTROL | MOD_ALT, VK_HOME))
+        self.hotkey_bindings = []
+        self._hotkey_id_map = {}
+        failed = self.set_hotkey_bindings(hotkeys_mod.load_bindings())
+        for binding in failed:
+            logger.warning("Failed to register hotkey (already in use?): %s", binding)
         self.controller.set_timer_handler(self._on_timer)
         self.hook = ForegroundHook(on_change=self._reassert_topmost)
         self._shut_down = False
@@ -178,13 +173,41 @@ class PowerDimApp:
         self._use_gamma = mode == DIMMING_MODE_GAMMA
         self.set_brightness(self.brightness)
 
+    def set_hotkey_bindings(self, bindings: list) -> list:
+        """Replace all hotkey bindings, persist them, and return the subset that
+        failed to register (e.g. already claimed by another application) so the
+        editor UI can warn about them; those are simply dropped rather than
+        blocking the rest from taking effect."""
+        for hotkey_id in list(self._hotkey_id_map):
+            self.controller.unregister_hotkey(hotkey_id)
+        registered = []
+        failed = []
+        id_map = {}
+        for i, binding in enumerate(bindings, start=1):
+            try:
+                self.controller.register_hotkey(HotkeySpec(i, binding.modifiers, binding.vk))
+            except OSError:
+                failed.append(binding)
+                continue
+            id_map[i] = binding
+            registered.append(binding)
+        self._hotkey_id_map = id_map
+        self.hotkey_bindings = registered
+        hotkeys_mod.save_bindings(registered)
+        return failed
+
     def _on_hotkey(self, hotkey_id: int) -> None:
-        if hotkey_id == HOTKEY_BRIGHTNESS_UP:
+        binding = self._hotkey_id_map.get(hotkey_id)
+        if binding is None:
+            return
+        if binding.action == hotkeys_mod.ACTION_BRIGHTNESS_UP:
             self.set_brightness(self.brightness + BRIGHTNESS_STEP)
-        elif hotkey_id == HOTKEY_BRIGHTNESS_DOWN:
+        elif binding.action == hotkeys_mod.ACTION_BRIGHTNESS_DOWN:
             self.set_brightness(self.brightness - BRIGHTNESS_STEP)
-        elif hotkey_id == HOTKEY_RESET:
+        elif binding.action == hotkeys_mod.ACTION_RESET:
             self.set_brightness(100)
+        elif binding.action == hotkeys_mod.ACTION_SET_VALUE:
+            self.set_brightness(hotkeys_mod.next_brightness_for_set_value(self.brightness, binding.value))
 
     def _on_timer(self, timer_id: int) -> None:
         if timer_id == GAMMA_POLL_TIMER_ID and self._gamma_dimmers:
@@ -241,11 +264,13 @@ class PowerDimApp:
                 if self.monitor_enabled.get(overlay.device_name, True):
                     overlay.hide()
             if self._gamma_dimmers:
+                # Every monitor, including disabled ones, so 100% is always a
+                # genuine "back to normal" regardless of per-monitor selection.
+                # set_brightness(100) rather than restore() so an active shadow
+                # lift is preserved -- that's only ever toggled from the VRR
+                # Black Flicker Tool menu.
                 for dimmer in self._gamma_dimmers:
-                    if self.monitor_enabled.get(dimmer.device_name, True):
-                        # set_brightness(100) rather than restore() so an active
-                        # shadow lift (independent of brightness) is preserved.
-                        dimmer.set_brightness(100)
+                    dimmer.set_brightness(100)
             # A full-brightness cycle is a natural recovery point: retry the
             # overlay next time in case the offending app has since closed -- but
             # only in overlay mode; dedicated gamma mode never touches the overlay.
@@ -385,15 +410,6 @@ class PowerDimApp:
                 continue
             overlay.set_alpha(alpha)
             overlay.show()
-
-    def force_reset_gamma(self) -> None:
-        """Manual escape hatch: force every monitor's gamma/SDR-white-level state back
-        to its captured baseline, regardless of current mode or per-monitor selection.
-        Exposed via the tray."""
-        if self._gamma_dimmers:
-            for dimmer in self._gamma_dimmers:
-                dimmer.restore()
-        self.shadow_lift_active = False
 
     def shutdown(self) -> None:
         if self._shut_down:

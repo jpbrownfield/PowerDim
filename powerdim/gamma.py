@@ -91,7 +91,7 @@ class GammaChannel:
             gamma_recovery.clear_baseline(self.device_name)
         # else: leave the record in place -- a still-dimmed monitor must keep its
         # safety net until a restore actually succeeds (retried on the next launch
-        # or via the manual "Reset display to normal" tray action).
+        # or via the "100% (Disabled)" tray brightness preset).
         return recovered
 
     def _read_ramp(self) -> GAMMARAMP | None:

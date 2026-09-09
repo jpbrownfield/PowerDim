@@ -35,40 +35,86 @@ jobs:
       - name: Determine release tag
         id: version
         shell: pwsh
+        env:
+          # Passed through env rather than interpolated into the script directly,
+          # since the commit message is attacker-controllable and inlining it
+          # into the run block would be a script-injection risk.
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           if ($env:GITHUB_REF -like 'refs/tags/*') {
             $tag = $env:GITHUB_REF_NAME
           } else {
-            # Branch push: auto-bump the patch version off the highest existing
-            # vX.Y.Z tag (starting at v0.1.0 if there isn't one yet) and push it,
-            # which also re-triggers this workflow for the tag itself -- that
-            # second run just reuses the tag below instead of bumping again.
+            # Branch push: an explicit @x.y.z in the commit message wins outright;
+            # otherwise auto-bump the patch version off the highest existing
+            # vX.Y.Z tag (starting at v0.1.0 if there isn't one yet).
             git fetch --tags --quiet
-            $tags = git tag --list 'v*.*.*' | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } | Sort-Object { [version]($_ -replace '^v', '') }
-            if ($tags) {
+            # @(...) forces an array even when there's exactly one matching tag --
+            # otherwise PowerShell unwraps a single result to a plain string and
+            # $tags[-1] would index its last *character*, not the last tag.
+            $tags = @(git tag --list 'v*.*.*' | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } | Sort-Object { [version]($_ -replace '^v', '') })
+            if ($env:COMMIT_MESSAGE -match '@(\d+\.\d+\.\d+)') {
+              $tag = "v$($matches[1])"
+            } elseif ($tags) {
               $parts = ($tags[-1] -replace '^v', '').Split('.')
               $tag = "v$($parts[0]).$($parts[1]).$([int]$parts[2] + 1)"
             } else {
               $tag = "v0.1.0"
             }
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag $tag
-            git push origin $tag
+            # This also re-triggers the workflow for the tag itself -- that second
+            # run just reuses the tag above instead of bumping/re-parsing again.
+            # If the requested tag already exists (e.g. a stale @x.y.z), reuse it
+            # instead of failing the whole build on a duplicate-tag error.
+            $existing = @(git tag --list $tag)
+            if (-not $existing) {
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag $tag
+              git push origin $tag
+            }
           }
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Set package version
+        shell: pwsh
+        run: |
+          $version = $env:TAG.TrimStart('v')
+          Set-Content -Path powerdim/version.py -Value "__version__ = `"$version`""
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
 
       - name: Build executable
         run: pyinstaller --onefile --noconsole --name PowerDim --icon assets/icon.ico main.py
 
+      - name: Sign executable
+        if: ${{ secrets.CODESIGN_PFX_BASE64 != '' }}
+        shell: pwsh
+        env:
+          CODESIGN_PFX_BASE64: ${{ secrets.CODESIGN_PFX_BASE64 }}
+          CODESIGN_PASSWORD: ${{ secrets.CODESIGN_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODESIGN_PFX_BASE64))
+          $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" |
+            Where-Object { $_.FullName -match "x64" } | Select-Object -First 1).FullName
+          & $signtool sign /f $pfxPath /p $env:CODESIGN_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist/PowerDim.exe
+          Remove-Item -Path $pfxPath -Force
+
+      - name: Compute checksum
+        shell: pwsh
+        run: (Get-FileHash dist/PowerDim.exe -Algorithm SHA256).Hash.ToLower() + "  PowerDim.exe" | Set-Content dist/PowerDim.exe.sha256
+
       - uses: actions/upload-artifact@v4
         with:
           name: PowerDim-windows
-          path: dist/PowerDim.exe
+          path: |
+            dist/PowerDim.exe
+            dist/PowerDim.exe.sha256
 
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          files: dist/PowerDim.exe
+          files: |
+            dist/PowerDim.exe
+            dist/PowerDim.exe.sha256
           generate_release_notes: true

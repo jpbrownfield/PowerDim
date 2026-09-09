@@ -1,9 +1,15 @@
 """System tray icon: brightness presets + exit, running on its own thread."""
+import ctypes
+import logging
 import re
 import threading
+import tkinter as tk
+from ctypes import wintypes
+from tkinter import messagebox
 
 import pystray
 
+from . import updater
 from .app import (
     DIMMING_MODE_GAMMA,
     DIMMING_MODE_OVERLAY,
@@ -12,8 +18,27 @@ from .app import (
     PowerDimApp,
 )
 from .app_icon import make_icon_image
+from .hotkey_editor import open_hotkey_editor
 from .schedule_editor import open_schedule_editor
 from .shadow_lift_editor import open_shadow_lift_editor
+from .win32defs import (
+    MONITOR_DEFAULTTONEAREST,
+    MONITORINFO,
+    TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN,
+    TPM_RETURNCMD,
+    TPM_RIGHTALIGN,
+    TPM_TOPALIGN,
+    user32,
+)
+
+# pystray's own custom message code for tray icon notifications (WM_USER + 11),
+# used below to override its default popup-menu positioning.
+_WM_NOTIFY = 0x400 + 11
+_WM_LBUTTONUP = 0x0202
+_WM_RBUTTONUP = 0x0205
+
+logger = logging.getLogger(__name__)
 
 _PRESETS = [100, 90, 80, 70, 60, 50, 40, 30, 20]
 
@@ -30,6 +55,102 @@ _GAMMA_DURATION_LABELS = {
     120: "2 hours",
     GAMMA_DURATION_INDEFINITE: "Indefinitely",
 }
+
+
+def _menu_anchor(cursor_x, cursor_y):
+    """Clamp the popup point to the work area of the monitor under the cursor
+    (i.e. excluding the taskbar) and pick which corner to anchor from, so the
+    menu is always drawn fully above/beside the taskbar rather than under it.
+    """
+    monitor = user32.MonitorFromPoint(wintypes.POINT(cursor_x, cursor_y), MONITOR_DEFAULTTONEAREST)
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return cursor_x, cursor_y, TPM_RIGHTALIGN | TPM_BOTTOMALIGN
+
+    work, mon = info.rcWork, info.rcMonitor
+    x, y = cursor_x, cursor_y
+
+    if work.bottom < mon.bottom:
+        y, valign = min(y, work.bottom), TPM_BOTTOMALIGN
+    elif work.top > mon.top:
+        y, valign = max(y, work.top), TPM_TOPALIGN
+    else:
+        valign = TPM_BOTTOMALIGN
+
+    if work.right < mon.right:
+        x, halign = min(x, work.right), TPM_RIGHTALIGN
+    elif work.left > mon.left:
+        x, halign = max(x, work.left), TPM_LEFTALIGN
+    else:
+        halign = TPM_RIGHTALIGN
+
+    return x, y, halign | valign
+
+
+def _install_taskbar_aware_menu(icon) -> None:
+    """Replace pystray's default right-click handler (which anchors the menu
+    to the raw cursor position) with one that anchors to the monitor's work
+    area instead, so the menu never renders underneath the taskbar.
+
+    Relies on pystray's private _menu_handle/_hwnd/_menu_hwnd attributes --
+    if a future pystray version renames these, we just fall back silently to
+    its own (still functional) default positioning.
+    """
+
+    def on_notify(wparam, lparam):
+        if lparam == _WM_LBUTTONUP:
+            icon()
+            return
+        if lparam != _WM_RBUTTONUP or not icon._menu_handle:
+            return
+
+        user32.SetForegroundWindow(icon._hwnd)
+        cursor = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(cursor))
+        x, y, align = _menu_anchor(cursor.x, cursor.y)
+
+        hmenu, descriptors = icon._menu_handle
+        index = user32.TrackPopupMenuEx(hmenu, align | TPM_RETURNCMD, x, y, icon._menu_hwnd, None)
+        if index > 0:
+            descriptors[index - 1](icon)
+
+    try:
+        icon._message_handlers[_WM_NOTIFY] = on_notify
+    except AttributeError:
+        logger.warning("Could not install taskbar-aware menu positioning; using pystray's default.")
+
+
+def _ask_install_update(version: str) -> bool:
+    root = tk.Tk()
+    root.withdraw()
+    answer = messagebox.askyesno(
+        "PowerDim Update", f"Version {version} is available. Download and install now?"
+    )
+    root.destroy()
+    return answer
+
+
+def _check_for_update_flow(icon, on_exit) -> None:
+    info = updater.check_for_update()
+    if info is None:
+        icon.notify("You're already on the latest version.", "PowerDim")
+        return
+    if not _ask_install_update(info.version):
+        return
+    try:
+        new_exe = updater.download_update(info)
+        updater.apply_update(new_exe)
+    except updater.UpdateError as exc:
+        icon.notify(f"Update failed: {exc}", "PowerDim")
+        return
+    except Exception:
+        logger.exception("Unexpected error while applying update")
+        icon.notify("Update failed unexpectedly. Check the log for details.", "PowerDim")
+        return
+    icon.notify(f"Installing PowerDim {info.version}; restarting now.", "PowerDim")
+    icon.stop()
+    on_exit()
 
 
 def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
@@ -67,9 +188,6 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
         icon.stop()
         on_exit()
 
-    def handle_reset_gamma(icon, item):
-        app.force_reset_gamma()
-
     def handle_toggle_schedule(icon, item):
         app.set_schedule_enabled(not app.schedule_enabled)
 
@@ -78,6 +196,12 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
 
     def handle_toggle_run_on_startup(icon, item):
         app.set_run_on_startup(not app.run_on_startup)
+
+    def handle_configure_hotkeys(icon, item):
+        threading.Thread(target=open_hotkey_editor, args=(app,), daemon=True).start()
+
+    def handle_check_for_update(icon, item):
+        threading.Thread(target=_check_for_update_flow, args=(icon, on_exit), daemon=True).start()
 
     # Best-effort match to the number Windows itself shows in Display Settings:
     # device names are of the form "\\.\DISPLAYn"; fall back to enumeration
@@ -178,7 +302,7 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
     ]
     menu_items.append(
         pystray.MenuItem(
-            "Use Gamma Mode if Z-Fighting is Detected for",
+            "Use Gamma Mode when Z-Fighting is Detected for:",
             pystray.Menu(*gamma_duration_items),
             # Irrelevant once gamma is the dedicated mode (no overlay to flicker) or
             # if no active display even accepts a gamma-ramp/SDR-white-level write.
@@ -207,7 +331,7 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
             checked=lambda item: app.run_on_startup,
         )
     )
-    menu_items.append(pystray.MenuItem("Reset display to normal", handle_reset_gamma))
+    menu_items.append(pystray.MenuItem("Configure Hotkeys...", handle_configure_hotkeys))
     menu_items.append(
         pystray.MenuItem(
             "OLED VRR Black Flicker Tool",
@@ -224,12 +348,11 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
             visible=lambda item: any(app.monitor_gamma_supported.values()),
         )
     )
+    menu_items.append(pystray.MenuItem("Check for Updates...", handle_check_for_update))
     menu_items.append(pystray.MenuItem("Exit", handle_exit))
-    # Disabled blank row so the menu's last real item doesn't sit flush against
-    # the taskbar edge / get obscured by it.
-    menu_items.append(pystray.MenuItem(" ", None, enabled=False))
 
     icon = pystray.Icon("PowerDim", make_icon_image(), "PowerDim", pystray.Menu(*menu_items))
+    _install_taskbar_aware_menu(icon)
     app.on_flicker_fallback = lambda: icon.notify(
         "Switching to gamma dimming due to detected flicker", "PowerDim"
     )
