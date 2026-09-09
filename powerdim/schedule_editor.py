@@ -191,25 +191,35 @@ def open_schedule_editor(app) -> None:
     tree.bind("<<TreeviewSelect>>", on_row_selected)
 
     def autosave(*_args) -> None:
-        nonlocal selected_entry
-        if suspend_autosave:
+        # Only live-updates an already-selected entry; new entries require
+        # the explicit Add button so they aren't created just by typing.
+        if suspend_autosave or selected_entry is None:
             return
         parsed = parse_form()
         if parsed is None:
             return
         hour, minute, brightness = parsed
-        if selected_entry is not None:
-            selected_entry.hour, selected_entry.minute, selected_entry.brightness = hour, minute, brightness
-            selected_entry.enabled = enabled_var.get()
-        else:
-            selected_entry = schedule_mod.ScheduleEntry(
-                hour=hour, minute=minute, brightness=brightness, enabled=enabled_var.get()
-            )
-            entries.append(selected_entry)
+        selected_entry.hour, selected_entry.minute, selected_entry.brightness = hour, minute, brightness
+        selected_entry.enabled = enabled_var.get()
         persist()
 
     for var in (hour_var, minute_var, ampm_var, brightness_var, enabled_var):
         var.trace_add("write", autosave)
+
+    def add_entry() -> None:
+        nonlocal selected_entry
+        if selected_entry is not None:
+            messagebox.showinfo("PowerDim Schedule", "Click Clear first to add a new entry.")
+            return
+        parsed = parse_form()
+        if parsed is None:
+            return
+        hour, minute, brightness = parsed
+        selected_entry = schedule_mod.ScheduleEntry(
+            hour=hour, minute=minute, brightness=brightness, enabled=enabled_var.get()
+        )
+        entries.append(selected_entry)
+        persist()
 
     def delete_entry() -> None:
         nonlocal selected_entry
@@ -226,11 +236,15 @@ def open_schedule_editor(app) -> None:
 
     button_bar = ttk.Frame(root)
     button_bar.grid(row=3, column=0, columnspan=4, pady=(0, 10))
-    ttk.Button(button_bar, text="Delete Selected", command=delete_entry).grid(row=0, column=0, padx=6)
-    ttk.Button(button_bar, text="Clear", command=clear_form).grid(row=0, column=1, padx=6)
+    ttk.Button(button_bar, text="Add Entry", command=add_entry).grid(row=0, column=0, padx=6)
+    ttk.Button(button_bar, text="Delete Selected", command=delete_entry).grid(row=0, column=1, padx=6)
+    ttk.Button(button_bar, text="Clear", command=clear_form).grid(row=0, column=2, padx=6)
 
     root.grid_rowconfigure(0, weight=1)
     root.grid_columnconfigure(0, weight=1)
 
     refresh()
     root.mainloop()
+    # Re-check right away so a newly added/edited entry is felt immediately
+    # instead of waiting for the next scheduled poll.
+    app.check_schedule_now()

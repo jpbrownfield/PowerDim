@@ -229,6 +229,10 @@ class PowerDimApp:
             self.set_brightness(target)
         self._last_scheduled_brightness = target
 
+    def check_schedule_now(self) -> None:
+        """Public entry point to force an immediate schedule check (e.g. after the editor closes)."""
+        self._check_schedule()
+
     def set_schedule_enabled(self, enabled: bool) -> None:
         self.schedule_enabled = enabled
         self._last_scheduled_brightness = None  # force re-apply on the next check
