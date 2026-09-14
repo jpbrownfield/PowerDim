@@ -1,6 +1,7 @@
 """System tray icon: brightness presets + exit, running on its own thread."""
 import ctypes
 import logging
+import math
 import re
 import threading
 import tkinter as tk
@@ -18,6 +19,7 @@ from .app import (
     PowerDimApp,
 )
 from .app_icon import make_icon_image
+from .dimming import is_full_brightness
 from .hotkey_editor import open_hotkey_editor
 from .schedule_editor import open_schedule_editor
 from .shadow_lift_editor import open_shadow_lift_editor
@@ -99,10 +101,7 @@ def _install_taskbar_aware_menu(icon) -> None:
     """
 
     def on_notify(wparam, lparam):
-        if lparam == _WM_LBUTTONUP:
-            icon()
-            return
-        if lparam != _WM_RBUTTONUP or not icon._menu_handle:
+        if lparam not in (_WM_LBUTTONUP, _WM_RBUTTONUP) or not icon._menu_handle:
             return
 
         user32.SetForegroundWindow(icon._hwnd)
@@ -121,6 +120,29 @@ def _install_taskbar_aware_menu(icon) -> None:
         logger.warning("Could not install taskbar-aware menu positioning; using pystray's default.")
 
 
+_PULSE_FRAME_INTERVAL = 0.08  # seconds between animation frames
+_PULSE_CYCLE_SECONDS = 1.6  # time for one full breathe in/out
+
+
+def _run_pulse_animation(icon, app: PowerDimApp, stop_event: threading.Event) -> None:
+    """While brightness is reduced, cycle the tray icon's ring through a
+    sine-wave "breathing" pulse so it's visible at a glance that PowerDim is
+    actively dimming; reverts to the static icon once back at 100%.
+    """
+    phase = 0.0
+    was_active = False
+    while not stop_event.wait(_PULSE_FRAME_INTERVAL):
+        active = not is_full_brightness(app.brightness)
+        if active:
+            phase = (phase + _PULSE_FRAME_INTERVAL / _PULSE_CYCLE_SECONDS) % 1.0
+            pulse = (math.sin(phase * 2 * math.pi) + 1) / 2
+            icon.icon = make_icon_image(pulse=pulse)
+            was_active = True
+        elif was_active:
+            icon.icon = make_icon_image()
+            was_active = False
+
+
 def _ask_install_update(version: str) -> bool:
     root = tk.Tk()
     root.withdraw()
@@ -131,7 +153,7 @@ def _ask_install_update(version: str) -> bool:
     return answer
 
 
-def _check_for_update_flow(icon, on_exit) -> None:
+def _check_for_update_flow(icon, on_exit, pulse_stop_event: threading.Event) -> None:
     info = updater.check_for_update()
     if info is None:
         icon.notify("You're already on the latest version.", "PowerDim")
@@ -149,11 +171,14 @@ def _check_for_update_flow(icon, on_exit) -> None:
         icon.notify("Update failed unexpectedly. Check the log for details.", "PowerDim")
         return
     icon.notify(f"Installing PowerDim {info.version}; restarting now.", "PowerDim")
+    pulse_stop_event.set()
     icon.stop()
     on_exit()
 
 
 def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
+    pulse_stop_event = threading.Event()
+
     def make_set_brightness(value):
         def handler(icon, item):
             app.set_brightness(value)
@@ -185,6 +210,7 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
         threading.Thread(target=open_shadow_lift_editor, args=(app,), daemon=True).start()
 
     def handle_exit(icon, item):
+        pulse_stop_event.set()
         icon.stop()
         on_exit()
 
@@ -201,7 +227,9 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
         threading.Thread(target=open_hotkey_editor, args=(app,), daemon=True).start()
 
     def handle_check_for_update(icon, item):
-        threading.Thread(target=_check_for_update_flow, args=(icon, on_exit), daemon=True).start()
+        threading.Thread(
+            target=_check_for_update_flow, args=(icon, on_exit, pulse_stop_event), daemon=True
+        ).start()
 
     # Best-effort match to the number Windows itself shows in Display Settings:
     # device names are of the form "\\.\DISPLAYn"; fall back to enumeration
@@ -359,6 +387,9 @@ def build_tray_icon(app: PowerDimApp, on_exit) -> pystray.Icon:
     app.on_gamma_unavailable = lambda: icon.notify(
         "Gamma dimming is unavailable on this display. Staying on overlay mode.", "PowerDim"
     )
+    threading.Thread(
+        target=_run_pulse_animation, args=(icon, app, pulse_stop_event), daemon=True
+    ).start()
     return icon
 
 
