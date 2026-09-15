@@ -99,9 +99,11 @@ def test_check_for_update_returns_info_when_newer(monkeypatch):
 
 def test_download_update_rejects_checksum_mismatch(tmp_path, monkeypatch):
     exe_bytes = b"fake-exe-contents"
-    responses = iter([exe_bytes, b"deadbeef  PowerDim.exe"])
+    # Mismatch on both the initial attempt and the retry the code now performs.
+    responses = iter([exe_bytes, b"deadbeef  PowerDim.exe", exe_bytes, b"deadbeef  PowerDim.exe"])
     monkeypatch.setattr(updater.urllib.request, "urlopen", lambda url, timeout=30.0: _FakeResponse(next(responses)))
     monkeypatch.setattr(updater, "_UPDATE_DIR", tmp_path)
+    monkeypatch.setattr(updater.time, "sleep", lambda seconds: None)
 
     info = updater.UpdateInfo(version="v9.9.9", exe_url="x", checksum_url="y")
 
@@ -116,6 +118,23 @@ def test_download_update_accepts_matching_checksum(tmp_path, monkeypatch):
     monkeypatch.setattr(updater.urllib.request, "urlopen", lambda url, timeout=30.0: _FakeResponse(next(responses)))
     monkeypatch.setattr(updater, "_UPDATE_DIR", tmp_path)
     monkeypatch.setattr(updater, "EXPECTED_SIGNER_THUMBPRINT", "", raising=False)
+
+    info = updater.UpdateInfo(version="v9.9.9", exe_url="x", checksum_url="y")
+    dest = updater.download_update(info)
+
+    assert dest.read_bytes() == exe_bytes
+
+
+def test_download_update_recovers_from_transient_checksum_mismatch(tmp_path, monkeypatch):
+    exe_bytes = b"fake-exe-contents"
+    checksum = hashlib.sha256(exe_bytes).hexdigest()
+    # First attempt looks like a stale CDN edge (bad checksum); the retry gets
+    # the correct, matching pair.
+    responses = iter([exe_bytes, b"deadbeef  PowerDim.exe", exe_bytes, f"{checksum}  PowerDim.exe".encode()])
+    monkeypatch.setattr(updater.urllib.request, "urlopen", lambda url, timeout=30.0: _FakeResponse(next(responses)))
+    monkeypatch.setattr(updater, "_UPDATE_DIR", tmp_path)
+    monkeypatch.setattr(updater, "EXPECTED_SIGNER_THUMBPRINT", "", raising=False)
+    monkeypatch.setattr(updater.time, "sleep", lambda seconds: None)
 
     info = updater.UpdateInfo(version="v9.9.9", exe_url="x", checksum_url="y")
     dest = updater.download_update(info)

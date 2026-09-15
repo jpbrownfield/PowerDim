@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,10 +127,22 @@ def download_update(info: UpdateInfo) -> Path:
     _UPDATE_DIR.mkdir(parents=True, exist_ok=True)
     exe_bytes = _download(info.exe_url)
     if info.checksum_url:
-        expected = _download(info.checksum_url).decode("utf-8").strip().split()[0]
+        expected = _download(info.checksum_url).decode("utf-8").strip().split()[0].lower()
         actual = hashlib.sha256(exe_bytes).hexdigest()
-        if expected.lower() != actual.lower():
-            raise UpdateError("Downloaded update failed checksum verification.")
+        if expected != actual:
+            # One retry after a short pause -- a mismatch on the very first
+            # attempt is often a momentarily stale CDN edge rather than a
+            # genuinely bad release, and retrying re-fetches both assets.
+            logger.warning(
+                "Checksum mismatch on first attempt (expected %s, got %s); retrying once", expected, actual
+            )
+            time.sleep(2)
+            exe_bytes = _download(info.exe_url)
+            expected = _download(info.checksum_url).decode("utf-8").strip().split()[0].lower()
+            actual = hashlib.sha256(exe_bytes).hexdigest()
+            if expected != actual:
+                logger.error("Checksum mismatch persisted after retry (expected %s, got %s)", expected, actual)
+                raise UpdateError("Downloaded update failed checksum verification.")
     dest = _UPDATE_DIR / "PowerDim_new.exe"
     dest.write_bytes(exe_bytes)
     _verify_signature(dest)

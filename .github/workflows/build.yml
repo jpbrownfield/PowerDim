@@ -76,9 +76,20 @@ jobs:
               git push origin $tag
             }
           }
+          # Build/sign/checksum/release only happen on the tag-triggered run below --
+          # a branch push here just computes and pushes the tag (which re-triggers
+          # this workflow on the tag ref). Doing the actual build on BOTH runs would
+          # race two independent, non-byte-identical builds (PyInstaller isn't
+          # reproducible and signtool's timestamp counter-signature differs every
+          # run) against the same release, which can publish an exe from one run
+          # paired with the checksum file from the other -- a permanent, silent
+          # checksum-verification failure for anyone downloading it.
+          $isTag = ($env:GITHUB_REF -like 'refs/tags/*').ToString().ToLower()
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
+          echo "is_tag=$isTag" >> $env:GITHUB_OUTPUT
 
       - name: Set package version
+        if: steps.version.outputs.is_tag == 'true'
         shell: pwsh
         run: |
           $version = $env:TAG.TrimStart('v')
@@ -87,10 +98,11 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
 
       - name: Build executable
+        if: steps.version.outputs.is_tag == 'true'
         run: pyinstaller --onefile --noconsole --name PowerDim --icon assets/icon.ico main.py
 
       - name: Sign executable
-        if: ${{ env.HAS_CODESIGN_CERT == 'true' }}
+        if: ${{ steps.version.outputs.is_tag == 'true' && env.HAS_CODESIGN_CERT == 'true' }}
         shell: pwsh
         env:
           CODESIGN_PFX_BASE64: ${{ secrets.CODESIGN_PFX_BASE64 }}
@@ -104,10 +116,12 @@ jobs:
           Remove-Item -Path $pfxPath -Force
 
       - name: Compute checksum
+        if: steps.version.outputs.is_tag == 'true'
         shell: pwsh
         run: (Get-FileHash dist/PowerDim.exe -Algorithm SHA256).Hash.ToLower() + "  PowerDim.exe" | Set-Content dist/PowerDim.exe.sha256
 
       - uses: actions/upload-artifact@v4
+        if: steps.version.outputs.is_tag == 'true'
         with:
           name: PowerDim-windows
           path: |
@@ -115,6 +129,7 @@ jobs:
             dist/PowerDim.exe.sha256
 
       - name: Create release
+        if: steps.version.outputs.is_tag == 'true'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
