@@ -5,6 +5,16 @@ on:
     branches: ["**"]
     tags: ["v*"]
 
+# Serializes all runs of this workflow (across every branch/tag push) so two
+# pushes landing close together can't run concurrently. Without this, two
+# overlapping runs can both auto-compute the same next version number (before
+# either has pushed the new tag), then race to upload two different builds'
+# exe/checksum pair to the same release -- a permanent, silent checksum
+# mismatch for anyone downloading it.
+concurrency:
+  group: powerdim-release
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
